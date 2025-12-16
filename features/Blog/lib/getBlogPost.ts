@@ -8,13 +8,11 @@ import path from 'path';
 import matter from 'gray-matter';
 import { calculateReadingTime } from './calculateReadingTime';
 import { validateFrontmatter } from './validateFrontmatter';
-import type {
-  BlogPost,
-  BlogPostMeta,
-  Heading,
-  Locale,
-  Category
-} from '../types/blog';
+import { extractHeadings, generateHeadingId } from './extractHeadings';
+import type { BlogPost, BlogPostMeta, Locale, Category } from '../types/blog';
+
+// Re-export for backwards compatibility
+export { extractHeadings, generateHeadingId } from './extractHeadings';
 
 /**
  * Base path for blog content relative to the project root
@@ -26,46 +24,6 @@ const CONTENT_BASE_PATH = 'features/Blog/content/posts';
  */
 function getPostPath(locale: Locale, slug: string): string {
   return path.join(process.cwd(), CONTENT_BASE_PATH, locale, `${slug}.mdx`);
-}
-
-/**
- * Extracts headings from MDX content for table of contents
- * @param content - The MDX content string
- * @returns Array of Heading objects with id, text, and level
- */
-export function extractHeadings(content: string): Heading[] {
-  const headings: Heading[] = [];
-
-  // Match h2, h3, h4 headings in markdown format
-  // Matches: ## Heading, ### Heading, #### Heading
-  const headingRegex = /^(#{2,4})\s+(.+)$/gm;
-
-  let match;
-  while ((match = headingRegex.exec(content)) !== null) {
-    const level = match[1].length as 2 | 3 | 4;
-    const text = match[2].trim();
-
-    // Generate ID from heading text (lowercase, replace spaces with hyphens)
-    const id = generateHeadingId(text);
-
-    headings.push({ id, text, level });
-  }
-
-  return headings;
-}
-
-/**
- * Generates a URL-friendly ID from heading text
- * @param text - The heading text
- * @returns A slug-like ID
- */
-export function generateHeadingId(text: string): string {
-  return text
-    .toLowerCase()
-    .replace(/[^\w\s-]/g, '') // Remove special characters
-    .replace(/\s+/g, '-') // Replace spaces with hyphens
-    .replace(/-+/g, '-') // Replace multiple hyphens with single
-    .replace(/^-|-$/g, ''); // Remove leading/trailing hyphens
 }
 
 /**
