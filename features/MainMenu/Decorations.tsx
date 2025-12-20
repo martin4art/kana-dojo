@@ -1,10 +1,10 @@
 'use client';
-import { useEffect, useRef, useState, memo } from 'react';
+import { useEffect, useState, useMemo, useCallback } from 'react';
 import themeSets from '@/features/Preferences/data/themes';
 import { useClick } from '@/shared/hooks/useAudio';
 import clsx from 'clsx';
 
-// Explosion animation styles
+// Explosion animation styles - only injected once when interactive
 const explosionKeyframes = `
 @keyframes explode {
   0% {
@@ -31,10 +31,6 @@ const explosionKeyframes = `
 }
 `;
 
-type RawKanjiEntry = {
-  kanjiChar: string;
-};
-
 type DecorationFont = {
   name: string;
   font: {
@@ -42,67 +38,65 @@ type DecorationFont = {
   };
 };
 
-const kanjiSources = ['N5', 'N4', 'N3'] as const;
-
-const shuffle = <T,>(arr: T[]) => arr.slice().sort(() => Math.random() - 0.5);
-
-// Module-level cache for kanji characters - prevents refetching on every mount
-let kanjiCharsCache: string[] | null = null;
-let kanjiLoadingPromise: Promise<string[]> | null = null;
-
-const loadKanjiChars = async (): Promise<string[]> => {
-  if (kanjiCharsCache) return kanjiCharsCache;
-  if (kanjiLoadingPromise) return kanjiLoadingPromise;
-
-  kanjiLoadingPromise = Promise.all(
-    kanjiSources.map(async level => {
-      const response = await fetch(`/kanji/${level}.json`);
-      const data = (await response.json()) as RawKanjiEntry[];
-      return data.map(entry => entry.kanjiChar);
-    })
-  ).then(results => {
-    kanjiCharsCache = results.flat();
-    kanjiLoadingPromise = null;
-    return kanjiCharsCache;
-  });
-
-  return kanjiLoadingPromise;
+type CharacterStyle = {
+  char: string;
+  color: string;
+  fontClass: string;
+  animationDelay: string;
 };
 
-// Tailwind animations
-const animations = [
-  'motion-safe:animate-pulse'
-  // 'animate-bounce',
-  //   'animate-ping',
-  //   'animate-spin',
-];
+type AnimState = 'idle' | 'exploding' | 'hidden' | 'fading-in';
 
-// Get all available main colors from themes
-const getAllMainColors = () => {
+// ============================================================================
+// MODULE-LEVEL CACHING - Load once, use forever within session
+// ============================================================================
+
+let decorationsCache: string[] | null = null;
+let decorationsLoadingPromise: Promise<string[]> | null = null;
+let fontsCache: DecorationFont[] | null = null;
+let fontsLoadingPromise: Promise<DecorationFont[]> | null = null;
+let precomputedStylesCache: CharacterStyle[] | null = null;
+
+// Get all available main colors from themes (computed once at module load)
+const allMainColors = (() => {
   const colors = new Set<string>();
-  /* themeSets.forEach(themeGroup => {
-    themeGroup.themes.forEach(theme => {
-      colors.add(theme.mainColor);
-      if (theme.secondaryColor) colors.add(theme.secondaryColor);
-    });
-  }); */
   themeSets[2].themes.forEach(theme => {
     colors.add(theme.mainColor);
     if (theme.secondaryColor) colors.add(theme.secondaryColor);
   });
   return Array.from(colors);
+})();
+
+// Fisher-Yates shuffle (more efficient than sort-based)
+const shuffle = <T,>(arr: T[]): T[] => {
+  const result = arr.slice();
+  for (let i = result.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [result[i], result[j]] = [result[j], result[i]];
+  }
+  return result;
 };
 
-const allMainColors = getAllMainColors();
+// Load decorations JSON (minimal file with just characters)
+const loadDecorations = async (): Promise<string[]> => {
+  if (decorationsCache) return decorationsCache;
+  if (decorationsLoadingPromise) return decorationsLoadingPromise;
 
-// Lazy-load fonts cache
-let fontsCache: DecorationFont[] | null = null;
-let fontsLoadingPromise: Promise<DecorationFont[]> | null = null;
+  decorationsLoadingPromise = fetch('/kanji/decorations.json')
+    .then(res => res.json())
+    .then((chars: string[]) => {
+      decorationsCache = shuffle(chars);
+      decorationsLoadingPromise = null;
+      return decorationsCache;
+    });
 
+  return decorationsLoadingPromise;
+};
+
+// Load decoration fonts (lazy, only in production)
 const loadDecorationFonts = async (
   forceLoad = false
 ): Promise<DecorationFont[]> => {
-  // Only load decoration fonts in production (unless forced)
   if (process.env.NODE_ENV !== 'production' && !forceLoad) {
     return [];
   }
@@ -119,112 +113,33 @@ const loadDecorationFonts = async (
   return fontsLoadingPromise;
 };
 
-type AnimState = 'idle' | 'exploding' | 'hidden' | 'fading-in';
+// Pre-compute all styles once (characters + colors + fonts + delays)
+const precomputeStyles = async (
+  forceShow = false
+): Promise<CharacterStyle[]> => {
+  if (precomputedStylesCache) return precomputedStylesCache;
 
-// Component to render a single kanji character with random styles - memoized to prevent unnecessary re-renders
-const KanjiCharacter = ({
-  char,
-  forceShow = false,
-  interactive = false,
-  animState = 'idle',
-  onExplode
-}: {
-  char: string;
-  forceShow?: boolean;
-  interactive?: boolean;
-  animState?: AnimState;
-  onExplode?: () => void;
-}) => {
-  const [mounted, setMounted] = useState(false);
-  const [styles, setStyles] = useState({
-    color: '',
-    fontClass: '',
-    animation: ''
-  });
-  // Store a stable animation delay
-  const [animationDelay] = useState(() => `${Math.random() * 1000}ms`);
+  const [chars, fonts] = await Promise.all([
+    loadDecorations(),
+    loadDecorationFonts(forceShow)
+  ]);
 
-  useEffect(() => {
-    let isMounted = true;
+  precomputedStylesCache = chars.map(char => ({
+    char,
+    color: allMainColors[Math.floor(Math.random() * allMainColors.length)],
+    fontClass:
+      fonts.length > 0
+        ? fonts[Math.floor(Math.random() * fonts.length)].font.className
+        : '',
+    animationDelay: `${Math.floor(Math.random() * 1000)}ms`
+  }));
 
-    const initializeStyles = async () => {
-      // Lazy load fonts
-      const fonts = await loadDecorationFonts(forceShow);
-
-      if (!isMounted) return;
-
-      // Generate random styles on mount
-      const randomColor =
-        allMainColors[Math.floor(Math.random() * allMainColors.length)];
-      const randomFont =
-        fonts.length > 0
-          ? fonts[Math.floor(Math.random() * fonts.length)]
-          : null;
-      const randomAnimation =
-        animations[Math.floor(Math.random() * animations.length)];
-
-      setStyles({
-        color: randomColor,
-        fontClass: randomFont?.font.className ?? '',
-        animation: randomAnimation
-      });
-      setMounted(true);
-    };
-
-    void initializeStyles();
-
-    return () => {
-      isMounted = false;
-    };
-  }, [forceShow]);
-
-  const handleClick = () => {
-    if (!interactive || animState !== 'idle' || !onExplode) return;
-    onExplode();
-  };
-
-  if (!mounted) return null;
-
-  const getAnimationStyle = () => {
-    if (!interactive) {
-      return { animationDelay };
-    }
-    switch (animState) {
-      case 'exploding':
-        return { animation: 'explode 300ms ease-out forwards' };
-      case 'hidden':
-        return { opacity: 0 };
-      case 'fading-in':
-        return { animation: 'fadeIn 500ms ease-in forwards' };
-      default:
-        return {};
-    }
-  };
-
-  return (
-    <span
-      className={clsx(
-        'inline-flex items-center justify-center text-4xl',
-        styles.fontClass,
-        !interactive && styles.animation,
-        interactive && animState === 'idle' && 'cursor-pointer'
-      )}
-      aria-hidden='true'
-      style={{
-        color: styles.color,
-        transformOrigin: 'center center',
-        pointerEvents: interactive && animState !== 'idle' ? 'none' : undefined,
-        ...getAnimationStyle()
-      }}
-      onClick={interactive && animState === 'idle' ? handleClick : undefined}
-    >
-      {char}
-    </span>
-  );
+  return precomputedStylesCache;
 };
 
-const MemoizedKanjiCharacter = memo(KanjiCharacter);
-MemoizedKanjiCharacter.displayName = 'KanjiCharacter';
+// ============================================================================
+// COMPONENT
+// ============================================================================
 
 const Decorations = ({
   expandDecorations,
@@ -235,53 +150,108 @@ const Decorations = ({
   forceShow?: boolean;
   interactive?: boolean;
 }) => {
-  const [kanjiList, setKanjiList] = useState<string[]>([]);
+  const [styles, setStyles] = useState<CharacterStyle[]>([]);
   const [animStates, setAnimStates] = useState<Map<number, AnimState>>(
     new Map()
   );
-  const animatingRef = useRef<Set<number>>(new Set());
   const { playClick } = useClick();
 
+  // Load all data and styles once on mount
   useEffect(() => {
     let isMounted = true;
 
-    const loadKanji = async () => {
-      // Use cached kanji chars to avoid refetching on every mount
-      const chars = await loadKanjiChars();
-      if (!isMounted) return;
-      setKanjiList(shuffle(chars));
-    };
-
-    void loadKanji();
+    precomputeStyles(forceShow).then(computedStyles => {
+      if (isMounted) {
+        setStyles(computedStyles);
+      }
+    });
 
     return () => {
       isMounted = false;
     };
-  }, []);
+  }, [forceShow]);
 
-  const triggerExplosion = (index: number) => {
-    if (animatingRef.current.has(index)) return;
-    animatingRef.current.add(index);
-    playClick();
+  // Memoized explosion handler
+  const triggerExplosion = useCallback(
+    (index: number) => {
+      if (animStates.get(index)) return; // Already animating
+      playClick();
 
-    setAnimStates(prev => new Map(prev).set(index, 'exploding'));
+      setAnimStates(prev => new Map(prev).set(index, 'exploding'));
 
-    // Animation state transitions
-    setTimeout(() => {
-      setAnimStates(prev => new Map(prev).set(index, 'hidden'));
+      // Animation state transitions
       setTimeout(() => {
-        setAnimStates(prev => new Map(prev).set(index, 'fading-in'));
+        setAnimStates(prev => new Map(prev).set(index, 'hidden'));
         setTimeout(() => {
-          setAnimStates(prev => {
-            const next = new Map(prev);
-            next.delete(index);
-            return next;
-          });
-          animatingRef.current.delete(index);
-        }, 500);
-      }, 1500);
-    }, 300);
-  };
+          setAnimStates(prev => new Map(prev).set(index, 'fading-in'));
+          setTimeout(() => {
+            setAnimStates(prev => {
+              const next = new Map(prev);
+              next.delete(index);
+              return next;
+            });
+          }, 500);
+        }, 1500);
+      }, 300);
+    },
+    [animStates, playClick]
+  );
+
+  // Memoize the animation style getter
+  const getAnimationStyle = useCallback(
+    (index: number, delay: string): React.CSSProperties => {
+      if (!interactive) {
+        return { animationDelay: delay };
+      }
+      const state = animStates.get(index);
+      switch (state) {
+        case 'exploding':
+          return { animation: 'explode 300ms ease-out forwards' };
+        case 'hidden':
+          return { opacity: 0 };
+        case 'fading-in':
+          return { animation: 'fadeIn 500ms ease-in forwards' };
+        default:
+          return {};
+      }
+    },
+    [interactive, animStates]
+  );
+
+  // Memoize the grid content to prevent unnecessary re-renders
+  const gridContent = useMemo(() => {
+    if (styles.length === 0) return null;
+
+    return styles.map((style, index) => {
+      const animState = animStates.get(index) ?? 'idle';
+      const isClickable = interactive && animState === 'idle';
+
+      return (
+        <span
+          key={index}
+          className={clsx(
+            'inline-flex items-center justify-center text-4xl',
+            style.fontClass,
+            !interactive && 'motion-safe:animate-pulse',
+            isClickable && 'cursor-pointer'
+          )}
+          aria-hidden='true'
+          style={{
+            color: style.color,
+            transformOrigin: 'center center',
+            pointerEvents:
+              interactive && animState !== 'idle' ? 'none' : undefined,
+            ...getAnimationStyle(index, style.animationDelay)
+          }}
+          onClick={isClickable ? () => triggerExplosion(index) : undefined}
+        >
+          {style.char}
+        </span>
+      );
+    });
+  }, [styles, animStates, interactive, getAnimationStyle, triggerExplosion]);
+
+  if (styles.length === 0) return null;
 
   return (
     <>
@@ -299,16 +269,7 @@ const Decorations = ({
             interactive ? 'grid-cols-10 md:grid-cols-28' : 'grid-cols-28'
           )}
         >
-          {kanjiList.map((char, index) => (
-            <MemoizedKanjiCharacter
-              char={char}
-              key={index}
-              forceShow={forceShow}
-              interactive={interactive}
-              animState={animStates.get(index) ?? 'idle'}
-              onExplode={() => triggerExplosion(index)}
-            />
-          ))}
+          {gridContent}
         </div>
       </div>
     </>
